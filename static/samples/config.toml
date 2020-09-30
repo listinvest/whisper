@@ -1,0 +1,146 @@
+[app]
+# Address to listen.
+address = "127.0.0.1:9000"
+
+# No trailing slashes.
+root_url = "/"
+
+name = "Niltalk chat"
+
+max_rooms = 1000
+max_peers_per_room = 25
+
+# Peer handle format (%s for ID) for peers who don't pick handles.
+peer_handle_format = "Peer:%s"
+
+# Length of the randomly generated room ID.
+room_id_length = 8
+
+# The number of messages and events (join / leave) etc. that has to be cached
+# in a room to send to peers when they first join.
+max_cached_messages = 100
+
+# Maximum message length in bytes.
+max_message_length = 3000
+
+# Permitted message rate (messages / interval) after which a peer is kicked.
+rate_limit_messages = 25
+rate_limit_interval = "3s"
+
+# How long will the room id persist in the db before first use?
+room_age = "24h"
+
+# Timeout in seconds for which the server will wait when sending
+# a message to a peer before closing the connection. Useful for
+# kicking out peers with slow connections.
+websocket_timeout = "3s"
+
+# Session cookie name.
+session_cookie = "niltoken"
+
+# Storage kind, one of redis|memory|fs.
+storage = "memory"
+
+# The theme to use, defaults to knadh, the original theme.
+theme = "knadh"
+
+[tor]
+enabled=true
+# Path to the tor private key path, leave it empty to store your key within the store.
+privatekey=""
+# Path to the torrc configuration file.
+torrc=""
+# enable ssl over tor
+ssl=true
+
+[ssl]
+address="" # the listen address of the ssl/tls listener
+enabled=false
+# kind of ssl certificate sources, one of files|letsencrypt|auto
+kind="auto"
+# path to the private key file of your certificate, only for kind=files
+privatekey=""
+# path to the certificate file, only for kind=files
+certificate=""
+# the list of domains to get certificate for, only for kind=letsencrypt
+domains= [ "yourdomain.com", "www.yourdomain.com" ]
+# your email, only for kind=letsencrypt
+email= "e@mail.com"
+# the kind of storage to use, storage=disk|store, if kind=store it uses the app storage,
+# if kind=files, it saves certificates into below path option.
+# defaults to store if the app storage is persistent.
+# otherwise, if app.storage=memory, it defaults to disk.
+storage=""
+# path to store certificates on disk, only when kind=letsencrypt and storage=disk.
+# if storage=disk this value will default to "certs".
+path=""
+
+# A list of predefined rooms.
+[rooms]
+  [rooms.local]
+  id="local"
+  name="local"
+  password=""
+    # desktop growling option for that room.
+    [rooms.local.growl]
+    message="{{.UserName}} is calling you. Open {{.URL}}"
+    title="Niltalk notification"
+    sound="knadh/static/beep.mp3"
+    motd="Welcome message of the day, type /help to get commands help"
+    # A list of predefined users to enable growling.
+    [[rooms.local.users]]
+    name="me1"
+    password="azerty"
+    growl=true
+    [[rooms.local.users]]
+    name="me2"
+    password="azerty"
+
+# Application storage options.
+# It supports redis, file or in-memory.
+# When the storage is persistent, rooms are cached until they expires.
+# Messages are not cached.
+[store]
+# Redis options.
+address = "redis:6379" # Eg: 127.0.0.1:6379
+password = ""
+db = 0
+active_conns = 100
+idle_conns = 20
+timeout = "3s"
+
+prefix_room = "NIL:ROOM:%s"
+prefix_session = "NIL:SESS:ROOM:%s"
+
+# File storage options.
+# path = "db.json"
+
+# In-memory storage options.
+# none.
+
+# File upload configuration.
+# Uploaded files are stored in memory exclusively.
+# A maximum amount of memory is configurable, when this limit is reached,
+# oldest files are deleted until enough space is available.
+[upload]
+# Max memory allowed for files storing.
+max-memory="32MB"
+# Maximum file uplod size. It is per request,
+# thus if you upload multiple files at once,
+# it is the whole size of the request that is checked.
+max-upload-size="2MB"
+# Maximum caching duration on the client side, longer is better. Too long is useless.
+max-age="1year"
+# Maximum number of uploads for below period.
+rate-limit-count="10"
+# The rate limit duration before reset of the counters.
+rate-limit-period="1minute"
+# The rate limit burst, if any.
+rate-limit-burst="1"
+
+# Options of the qrcode displayed on the homepage
+[qr]
+# enable a qrcode to the onion address
+tor=true
+# enable a qrcode to the clear net domain.
+clear="http://some.where.com/"
