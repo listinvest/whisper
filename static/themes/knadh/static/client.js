@@ -108,6 +108,10 @@ var Client = new function () {
 	this.rmKey = function (key) {
 		delete(keys[key.publicKey])
 	};
+	
+	this.clearKeys = function (key) {
+		keys = {}
+	};
 
 	// fetch peers list
 	this.getPeers = function () {

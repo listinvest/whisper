@@ -659,6 +659,7 @@ var app = new Vue({
         },
 
         onDisconnect(typ) {
+            Client.clearKeys()
             switch (typ) {
                 case Client.MsgType["disconnect"]:
                     this.notify("Disconnected. Retrying ...", notifType.notice);
@@ -685,48 +686,49 @@ var app = new Vue({
 
         onReconnecting(timeout) {
           this.notify("Disconnected. Trying to connect...", notifType.notice, timeout);
-      		var reconnect_timer = setTimeout(function () {
-      			reconnect_timer = null;
+          var reconnect_timer = setTimeout(function () {
+            reconnect_timer = null;
             this.notify("Logging in", notifType.notice);
+
             const bpub = this.mycrypto.publicKey();
             this.isRequesting = true;
             var fetchURL = "/r/" + _room.id + "/login"
             fetch(fetchURL, {
-                method: "post",
-                body: JSON.stringify({
-                  publickey: bpub,
-                  secret: this.self.secret,
-                }),
-                headers: { "Content-Type": "application/json; charset=utf-8" }
+              method: "post",
+              body: JSON.stringify({
+                publickey: bpub,
+                secret: this.self.secret,
+              }),
+              headers: { "Content-Type": "application/json; charset=utf-8" }
             })
             .then(resp => resp.json())
             .then(resp => {
-                if (resp.error) {
-                    this.notify(resp.error, notifType.error);
-                    setTimeout(function () {
-                      this.onReconnecting(timeout)
-                		}.bind(this), timeout/2);
-                    return;
-                }
-                this.self.avatar = this.hashColor(bpub);
-                this.self.since = resp.data.since;
-                this.self.serverpubkey = resp.data.serverpubkey;
-                Client.init(_room.id, this.mycrypto.get());
-                Client.addKey(this.mesharedcrypto.get());
-                Client.connect();
-                this.chatOn = true;
-                this.isRequesting = false;
-                this.deNotify();
-            })
-            .catch(err => {
-                this.isRequesting = false;
-                this.notify(err, notifType.error);
+              if (resp.error) {
+                this.notify(resp.error, notifType.error);
                 setTimeout(function () {
                   this.onReconnecting(timeout)
-            		}.bind(this), timeout/2);
+                }.bind(this), timeout/2);
+                return;
+              }
+              this.self.avatar = this.hashColor(bpub);
+              this.self.since = resp.data.since;
+              this.self.serverpubkey = resp.data.serverpubkey;
+              Client.init(_room.id, this.mycrypto.get());
+              Client.addKey(this.mesharedcrypto.get());
+              Client.connect();
+              this.chatOn = true;
+              this.isRequesting = false;
+              this.deNotify();
+            })
+            .catch(err => {
+              this.isRequesting = false;
+              this.notify(err, notifType.error);
+              setTimeout(function () {
+                this.onReconnecting(timeout)
+              }.bind(this), timeout/2);
             });
 
-      		}.bind(this), timeout);
+          }.bind(this), timeout);
         },
 
         // onPeerSelf(data) {
