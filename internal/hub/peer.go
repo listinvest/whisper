@@ -104,7 +104,7 @@ func (p *Peer) writeWSData(msgType int, payload []byte) error {
 
 // writeWSControl writes the given control payload to the peer's WS connection.
 func (p *Peer) writeWSControl(control int, payload []byte) error {
-	return p.ws.WriteControl(websocket.CloseMessage, payload, time.Time{})
+	return p.ws.WriteControl(control, payload, time.Time{})
 }
 
 // processMessage processes incoming messages from peers.

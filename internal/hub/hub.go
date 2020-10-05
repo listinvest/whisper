@@ -24,6 +24,7 @@ const (
 	TypePeerRateLimited = "peer.ratelimited"
 	TypeRoomDispose     = "room.dispose"
 	TypeRoomFull        = "room.full"
+	TypeMustLogin       = "room.full"
 	TypeNotice          = "notice"
 	// TypeHandle          = "handle"
 	TypeGrowl = "growl"

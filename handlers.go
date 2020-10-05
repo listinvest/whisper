@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -54,6 +53,7 @@ type reqRoom struct {
 
 type reqLogin struct {
 	PublicKey string `json:"publickey"`
+	Secret    string `json:"secret"`
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool {
@@ -132,24 +132,8 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		respondJSON(w, nil, err, http.StatusInternalServerError)
 		return
 	}
-	var pubkey [32]byte
-	if z, err := base64.StdEncoding.DecodeString(req.PublicKey); err != nil {
-		app.logger.Printf("error handling logging: %v", err)
-		respondJSON(w, nil, err, http.StatusInternalServerError)
-		return
-	} else {
-		copy(pubkey[:], z)
-	}
-	rnds, err := hub.GenerateGUID(10)
-	if err != nil {
-		app.logger.Printf("could't generate random guid: %v", err)
-		return
-	}
-	sum := sha256.Sum256(append([]byte(rnds), pubkey[:]...))
-	secret := fmt.Sprintf("%x", sum)
 
-	since := time.Now().UTC()
-	err = room.Login(secret, req.PublicKey, pubkey, since)
+	peer, err := room.Login(req.Secret, req.PublicKey)
 	if err == hub.ErrInvalidRoomPassword || err == hub.ErrInvalidUserPassword {
 		respondJSON(w, nil, errors.New("incorrect password"), http.StatusForbidden)
 		return
@@ -186,8 +170,8 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		Handle       string                   `json:"handle"`
 		SealedAuths  map[string]hub.SealedMsg `json:"sealedauths"`
 	}{
-		Secret:       secret,
-		Since:        since.Format(hub.JSDateFormat),
+		Secret:       peer.Secret,
+		Since:        peer.Since.Format(hub.JSDateFormat),
 		ServerPubKey: base64.StdEncoding.EncodeToString(room.PubKey[:]),
 		SealedAuths:  sealedAuths,
 		Handle:       handle,

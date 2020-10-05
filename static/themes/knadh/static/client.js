@@ -24,9 +24,9 @@ var Client = new function () {
 		"help": "help",
 		"crypted.message": "crypted.message",
 		"challenge.query": "challenge.query",
-		// "challenge.res": "challenge.res",
+		"challenge.failed": "challenge.failed",
 		"duplicate.handle": "duplicate.handle",
-		"invalid.sealedauthlicate.handle": "invalid.sealedauth"
+		"invalid.sealedauth": "invalid.sealedauth"
 	};
 	this.MsgType = MsgType;
 
@@ -166,8 +166,6 @@ var Client = new function () {
 			foundkey = keys[msg.to]
 		}else {
 			console.error("key not found for ", msg)
-			console.error("this",mycrypto.publicKey())
-			console.error("keys",keys)
 			return
 		}
 

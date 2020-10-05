@@ -46,6 +46,10 @@ var commands = {
     "help": "Show commands help",
     "usage": "/help [command]?",
   },
+  "debug": {
+    "help": "Print debug data",
+    "usage": "/debug",
+  },
 }
 
 function makeid(length) {
@@ -134,7 +138,6 @@ var app = new Vue({
         isDraggingOver: false,
 
         // p2p room connect validations
-        roomAccepted: false,
         connectStatus: {},
         negotiating: 0,
     },
@@ -185,6 +188,7 @@ var app = new Vue({
         handleLogin() {
             // const handle = this.handle.replace(/[^a-z0-9_\-\.@]/ig, "");
             const bpub = this.mycrypto.publicKey();
+            var password = this.password || this.self.password || "";
             var handle = this.self.handle || this.handle;
             if (!handle) {
               handle = makeid(5);
@@ -218,16 +222,16 @@ var app = new Vue({
                 this.isRequesting = false;
                 this.clear();
                 this.deNotify();
-                this.chatOn = true;
                 this.self.avatar = this.hashColor(bpub);
                 this.self.since = resp.data.since;
+                this.self.secret = resp.data.secret;
                 this.self.handle = handle;
                 if (al && resp.data.Handle!="") {
                   this.self.handle = resp.data.handle;
                   this.self.autologin = true;
                   this.self.sealedauths = resp.data.sealedauths || {};
                 }
-                this.self.password = this.password;
+                this.self.password = password;
                 // Client.rmKey({publicKey:this.self.serverpubkey});
                 this.self.serverpubkey = resp.data.serverpubkey;
                 Client.init(_room.id, this.mycrypto.get());
@@ -316,6 +320,9 @@ var app = new Vue({
           }else if (commandName=="handle"){
             this.handleSetHandle(userMsg, commandName, command)
 
+          }else if (commandName=="debug"){
+            this.handleDebug(userMsg, commandName, command)
+
           }else if (commandName=="growl"){
             this.handleGrowl(userMsg, commandName, command)
 
@@ -325,6 +332,16 @@ var app = new Vue({
           }else if (commandName=="whisper"){
             this.handleWhisper(userMsg, commandName, command)
           }
+        },
+
+        handleDebug(userMsg, commandName, command) {
+          console.log("self: ", this.self)
+          console.log("handle: ", this.handle)
+          console.log("password: ", this.password)
+          console.log("mycrypto: ", this.mycrypto.get())
+          console.log("mesharedcrypto: ", this.mesharedcrypto.get())
+          console.log("peers: ", this.peers)
+          console.log("connectStatus: ", this.connectStatus)
         },
 
         handleShowHelp(userMsg, commandName, command) {
@@ -629,7 +646,6 @@ var app = new Vue({
         clear() {
             this.handle = "";
             this.password = "";
-            this.password = "";
             this.message = "";
             this.self = {};
             this.messages = [];
@@ -668,7 +684,49 @@ var app = new Vue({
         },
 
         onReconnecting(timeout) {
-            this.notify("Disconnected. Refresh to reconnect ...", notifType.notice, timeout);
+          this.notify("Disconnected. Trying to connect...", notifType.notice, timeout);
+      		var reconnect_timer = setTimeout(function () {
+      			reconnect_timer = null;
+            this.notify("Logging in", notifType.notice);
+            const bpub = this.mycrypto.publicKey();
+            this.isRequesting = true;
+            var fetchURL = "/r/" + _room.id + "/login"
+            fetch(fetchURL, {
+                method: "post",
+                body: JSON.stringify({
+                  publickey: bpub,
+                  secret: this.self.secret,
+                }),
+                headers: { "Content-Type": "application/json; charset=utf-8" }
+            })
+            .then(resp => resp.json())
+            .then(resp => {
+                if (resp.error) {
+                    this.notify(resp.error, notifType.error);
+                    setTimeout(function () {
+                      this.onReconnecting(timeout)
+                		}.bind(this), timeout/2);
+                    return;
+                }
+                this.self.avatar = this.hashColor(bpub);
+                this.self.since = resp.data.since;
+                this.self.serverpubkey = resp.data.serverpubkey;
+                Client.init(_room.id, this.mycrypto.get());
+                Client.addKey(this.mesharedcrypto.get());
+                Client.connect();
+                this.chatOn = true;
+                this.isRequesting = false;
+                this.deNotify();
+            })
+            .catch(err => {
+                this.isRequesting = false;
+                this.notify(err, notifType.error);
+                setTimeout(function () {
+                  this.onReconnecting(timeout)
+            		}.bind(this), timeout/2);
+            });
+
+      		}.bind(this), timeout);
         },
 
         // onPeerSelf(data) {
@@ -751,7 +809,7 @@ var app = new Vue({
         // The challenge is a hash of the room password, the since server time value,
         // a nonce, and the peer public key.
         issueChallenge(peer) {
-          this.negotiating++;
+          this.updateConnectionStatus(peer.publicKey, "remote", "negotiating")
           const bPub = this.mycrypto.publicKey();
           const hnonce = this.mycrypto.newNonce();
           const hash = this.mycrypto.hashRoomPwd(this.self.password, peer.since, hnonce, bPub, peer.publicKey);
@@ -781,16 +839,17 @@ var app = new Vue({
         // Otherwise a duplicate handle message is issued.
         // It saves the peer handle to the peer list.
         onChallengeQuery(cleardata, data) {
+          var peer = this.peers.filter( isPubKey(data.from) ).shift();
+          if (!peer) {
+            console.error("invalid challenge: peer not found");
+            this.issueChallengeFailed({publicKey:data.from});
+            return
+          }
           const bpub = this.mycrypto.publicKey()
           const hash = this.mycrypto.hashRoomPwd(this.self.password, this.self.since, cleardata.nonce, data.from, bpub);
           if(hash!==cleardata.data) {
             console.error("invalid challenge: hash mismatch");
-            return
-          }
-          var f = false;
-          var peer = this.peers.filter( isPubKey(data.from) ).shift();
-          if (!peer) {
-            console.error("invalid challenge: peer not found");
+            this.issueChallengeFailed(peer);
             return
           }
           const isRenewHandle = (peer.passChallenge && peer.validHandle);
@@ -870,6 +929,7 @@ var app = new Vue({
         // The issue accept message contain the shared set of private/public key
         // to send chat messages.
         issueAccept(peer) {
+          this.updateConnectionStatus(peer.publicKey, "me", "room.accept")
           const bPub = this.mycrypto.publicKey();
           const data = {
             type: Client.MsgType["room.accept"],
@@ -879,9 +939,20 @@ var app = new Vue({
           Client.send(data, peer.publicKey);
         },
 
+        // issueChallengeFailed sends a chalenge failure message.
+        issueChallengeFailed(peer) {
+          this.updateConnectionStatus(peer.publicKey, "me", "challenge.failed")
+          const bPub = this.mycrypto.publicKey();
+          const data = {
+            type: Client.MsgType["challenge.failed"],
+          }
+          Client.send(data, peer.publicKey);
+        },
+
         // issueDuplicateHandle sends a duplicate handle message.
         // Is duplicated an handle that matches an existing handle.
         issueDuplicateHandle(peer, handle) {
+          this.updateConnectionStatus(peer.publicKey, "me", "duplicate.handle")
           const bPub = this.mycrypto.publicKey();
           const data = {
             type: Client.MsgType["duplicate.handle"],
@@ -894,12 +965,19 @@ var app = new Vue({
         // Is invalid a sealed auth that can not be decrypted,
         // did not present the correct secret or its token lifetime exceeded.
         issueInvalidSealedAuth(peer, handle) {
+          this.updateConnectionStatus(peer.publicKey, "me", "sealedauth.invalid")
           const bPub = this.mycrypto.publicKey();
           const data = {
             type: Client.MsgType["invalid.sealedauth"],
             handle: handle,
           }
           Client.send(data, peer.publicKey);
+        },
+
+        // onChallengeFailed handles challenge failed message.
+        onChallengeFailed(cleardata, data) {
+          const from = data.from;
+          this.updateConnectionStatus(from, "remote", "challenge.failed")
         },
 
         // onDuplicateHandle handles duplicate message.
@@ -909,10 +987,8 @@ var app = new Vue({
           if (cleardata.handle!==meHandle) {
             return
           }
-          this.negotiating--;
           const from = data.from;
-          this.connectStatus[from]= Client.MsgType["duplicate.handle"];
-          this.computeConnectionStatus();
+          this.updateConnectionStatus(from, "remote", "duplicate.handle")
         },
 
         // onInvalidSealedAuth handles invalid sealed auth message.
@@ -922,10 +998,8 @@ var app = new Vue({
           if (cleardata.handle!==meHandle) {
             return
           }
-          this.negotiating--;
           const from = data.from;
-          this.connectStatus[from]= Client.MsgType["invalid.sealedauth"];
-          this.computeConnectionStatus();
+          this.updateConnectionStatus(from, "remote", "invalid.sealedauth")
         },
 
         // onAccepted handles accept message.
@@ -933,13 +1007,20 @@ var app = new Vue({
         // It saves the peer shared keys to the peer list.
         onAccepted(cleardata, data) {
           const from = data.from;
-          this.negotiating--;
-          this.connectStatus[from]= Client.MsgType["room.accept"];
+          this.updateConnectionStatus(from, "remote", "room.accept")
           const remote = this.peers.filter( isPubKey(from) ).shift();
           if (remote){
             remote.shared = cleardata.shared;
             Client.addKey(cleardata.shared);
           }
+        },
+
+        // updateConnectionStatus
+        updateConnectionStatus(pk, v, s) {
+          if (!this.connectStatus[pk]) {
+            this.connectStatus[pk] = {}
+          }
+          this.connectStatus[pk][v] = s
           this.computeConnectionStatus();
         },
 
@@ -950,24 +1031,30 @@ var app = new Vue({
         // sequence.
         // Otherwise, the connection with other peers is OK/in progress.
         computeConnectionStatus() {
-          var totalOk = 0;
-          var handleKo = 0;
-          var invalidSealedAuth = 0;
-          Object.keys(this.connectStatus).map( (k) => {
-            if (this.connectStatus[k]===Client.MsgType["duplicate.handle"]) {
-              handleKo++;
-            }else if (this.connectStatus[k]===Client.MsgType["room.accept"]) {
-              totalOk++;
-            }else if (this.connectStatus[k]===Client.MsgType["invalid.sealedauth"]) {
-              invalidSealedAuth++;
-            }
-          })
+          this.negotiating = Object.keys(this.connectStatus).filter((k)=>{
+            return this.connectStatus[k]["remote"]==="negotiating";
+          }).length;
+
           const acceptedPeers = this.peers.filter( (p) => {
             return p.passChallenge;
           });
           const majority = acceptedPeers.length/2;
+          if (majority<1) {
+            return
+          }
+          var totalOk = 0;
+          var handleKo = 0;
+          var invalidSealedAuth = 0;
+          Object.keys(this.connectStatus).map( (k) => {
+            if (this.connectStatus[k]["remote"]===Client.MsgType["duplicate.handle"]) {
+              handleKo++;
+            }else if (this.connectStatus[k]["remote"]===Client.MsgType["room.accept"]) {
+              totalOk++;
+            }else if (this.connectStatus[k]["remote"]===Client.MsgType["invalid.sealedauth"]) {
+              invalidSealedAuth++;
+            }
+          })
           const totalKo = handleKo+invalidSealedAuth;
-          this.roomAccepted = false;
           if (handleKo>=majority) {
             this.notify("Your handle is already taken by another peer, change your nickname", notifType.error);
             this.renewHandle()
@@ -1214,6 +1301,7 @@ var app = new Vue({
             Client.on(Client.MsgType["ping"], this.onPing);
             Client.on(Client.MsgType["whisper"], this.onWhisper);
             Client.on(Client.MsgType["challenge.query"], this.onChallengeQuery);
+            Client.on(Client.MsgType["challenge.failed"], this.onChallengeFailed);
             Client.on(Client.MsgType["duplicate.handle"], this.onDuplicateHandle);
             Client.on(Client.MsgType["room.accept"], this.onAccepted);
             // Client.on(Client.MsgType["uploading"], this.onUpload);

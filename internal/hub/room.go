@@ -157,17 +157,34 @@ func NewRoom(id, name string, h *Hub, predefined bool) *Room {
 // Login an user into the room. It chekcs for room password,
 // user password is the handle belongs to a predefined user.
 // Generates a session ID and stores it into the store.
-func (r *Room) Login(secret, spubkey string, publicKey [32]byte, since time.Time) error {
-	var err error
+func (r *Room) Login(secret, spubkey string) (*Peer, error) {
+	var pubkey [32]byte
+	z, err := base64.StdEncoding.DecodeString(spubkey)
+	if err != nil {
+		return nil, err
+	}
+	copy(pubkey[:], z)
+
+	if secret == "" {
+		rnds, err := GenerateGUID(10)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(append([]byte(rnds), pubkey[:]...))
+		secret = fmt.Sprintf("%x", sum)
+	}
+
+	since := time.Now().UTC()
+
 	var wg sync.WaitGroup
 	wg.Add(1)
-	peer := newPeer(secret, spubkey, publicKey, since, r)
+	peer := newPeer(secret, spubkey, pubkey, since, r)
 	r.op <- func() {
 		defer wg.Done()
 		err = r.login(peer)
 	}
 	wg.Wait()
-	return err
+	return peer, err
 }
 
 func (r *Room) login(peer *Peer) error {
@@ -255,7 +272,10 @@ type peerConnect struct {
 // ConnectPeer connects a peer to the room given a WS connection from an HTTP
 // handler.
 func (r *Room) ConnectPeer( /*id, handle,*/ publicKey string, ws *websocket.Conn) {
-	r.peerConnect <- peerConnect{ws: ws, publicKey: publicKey}
+	r.peerConnect <- peerConnect{
+		ws:        ws,
+		publicKey: publicKey,
+	}
 }
 
 // GetSession retrieves peer session info.
@@ -342,36 +362,13 @@ loop:
 
 			peer := r.peers.byPublicKey(info.publicKey)
 			if peer == nil {
-				var pubkey [32]byte
-				z, err := base64.StdEncoding.DecodeString(info.publicKey)
-				if err != nil {
-					r.hub.log.Printf("error handling logging: %v", err)
-					continue
-				}
-				copy(pubkey[:], z)
-				rnds, err := GenerateGUID(10)
-				if err != nil {
-					r.hub.log.Printf("could't generate random guid: %v", err)
-					continue
-				}
-				sum := sha256.Sum256(append([]byte(rnds), pubkey[:]...))
-				secret := fmt.Sprintf("%x", sum)
-				peer = newPeer(secret, info.publicKey, pubkey, time.Now().UTC(), r)
-				err = r.login(peer)
-				if err != nil {
-					r.hub.log.Printf("peer %q not connected: %v", info.publicKey, err)
-					continue
-				}
-			}
-			peer.Connect(info.ws)
-
-			// Room's capacity is exchausted. Kick the peer out.
-			if len(r.peers) >= r.hub.cfg.MaxPeersPerRoom {
-				peer.writeWSControl(websocket.CloseMessage,
-					websocket.FormatCloseMessage(websocket.CloseNormalClosure, TypeRoomFull))
-				peer.ws.Close()
+				info.ws.WriteControl(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseNormalClosure, TypeMustLogin), time.Time{})
+				info.ws.Close()
+				r.hub.log.Printf("peer %q did not login", info.publicKey)
 				continue
 			}
+			peer.Connect(info.ws)
 
 			r.peers[peer] = true
 			go peer.RunListener()
