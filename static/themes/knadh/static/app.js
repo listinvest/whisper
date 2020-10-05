@@ -265,11 +265,13 @@ var app = new Vue({
 
             const bPub = this.mycrypto.publicKey();
             const oldest = this.validPeers().slice(0).sort(sortBySince).pop();
-            const data = {
-              type: Client.MsgType["typing"],
-              publicKey: bPub,
+            if (oldest && oldest.shared) {
+              const data = {
+                type: Client.MsgType["typing"],
+                publicKey: bPub,
+              }
+              Client.broadcast(data, oldest.shared.publicKey, oldest.shared);
             }
-            Client.broadcast(data, oldest.shared.publicKey, oldest.shared);
 
             this.typingTimer = window.setTimeout(() => {
                 this.typingTimer = null;
@@ -660,6 +662,7 @@ var app = new Vue({
 
         onDisconnect(typ) {
             Client.clearKeys()
+            this.connectStatus = {};
             switch (typ) {
                 case Client.MsgType["disconnect"]:
                     this.notify("Disconnected. Retrying ...", notifType.notice);
