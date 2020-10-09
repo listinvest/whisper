@@ -52,6 +52,10 @@ var commands = {
   },
 }
 
+// throw it at startup, though you will need an ssl certificate.
+Notify.requestPermission(null, null);
+var converter = new showdown.Converter();
+
 function makeid(length) {
    var result           = '';
    var characters       = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -62,26 +66,6 @@ function makeid(length) {
    return result;
 }
 
-function notPubKey(pubKey){
-  return (p) => {
-    return p.publicKey!==pubKey;
-  }
-}
-function isPubKey(pubKey){
-  return (p) => {
-    return p.publicKey===pubKey;
-  }
-}
-function sortBySince(a, b) {
-    const aSince = Date.parse(a.since)
-    const bSince = Date.parse(a.since)
-    if (aSince < bSince) {
-      return -1;
-    } else if (aSince > bSince) {
-      return 1;
-    }
-    return 0;
-}
 function sortByHandle(a, b) {
   if (a.handle < b.handle) {
       return -1;
@@ -91,10 +75,19 @@ function sortByHandle(a, b) {
   return 0;
 }
 
-// throw it at startup, though you will need an ssl certificate.
-Notify.requestPermission(null, null);
-
-var converter = new showdown.Converter();
+var MsgType = MsgType || {};
+MsgType.Motd = "motd";
+MsgType.Error = "error";
+MsgType.Help = "help";
+MsgType.Uploading = "uploading";
+MsgType.Upload = "upload";
+MsgType.PeerRenewHandle = EvType.PeerRenewHandle;
+MsgType.Whisper = "whisper";
+MsgType.Ping = "ping";
+MsgType.Typing = "typing";
+MsgType.RateLimited = "peer.ratelimited";
+MsgType.RoomFull = "room.full";
+MsgType.RoomDispose = "room.dispose";
 
 var app = new Vue({
     el: "#app",
@@ -124,41 +117,51 @@ var app = new Vue({
         roomName: "",
         handle: "",
         password: "",
-        userpwd: "",
         message: "",
 
         // Chat data.
+        serverpubkey: "",
         self: {},
-        mycrypto: {}, // my private key to send me private messages
-        mesharedcrypto: {}, // shared private key if this peer is "leader"
+        whisper: {},
+        transport: {},
+
         messages: [],
         peers: [],
 
         // upload
         isDraggingOver: false,
 
-        // p2p room connect validations
-        connectStatus: {},
         negotiating: 0,
     },
     created: function () {
-        this.initClient();
+        // this.initClient();
         this.initTimers();
-        this.mycrypto = window.cryptoutil();
-        this.mesharedcrypto = window.cryptoutil();
-        this.mycrypto.init();
-        this.mesharedcrypto.init();
 
+        this.whisper = new Whisper()
+        this.transport = new WsTransport(0)
+        this.transport.on(EvType.Connect, this.onTransportConnect.bind(this))
+        this.transport.on(EvType.Disconnect, this.onTransportDisconnect.bind(this))
+
+        this.whisper.on(EvType.Negotiating, this.onNegotiating.bind(this));
+        // this.whisper.on("handle.renew", this.onNegotiating.bind(this));
+        // this.whisper.on("peer.renewhandle", this.onPeerRenewHanle.bind(this));
+        this.whisper.on(EvType.PeerRenewHandle, this.onPeerRenewHandle.bind(this));
+        this.whisper.on(EvType.RenewMyHandle, this.onRenewMyHandle.bind(this));
+        this.whisper.on(EvType.PeerAccept, this.onPeerAccept.bind(this));
+        this.whisper.on(EvType.PeerLeave, this.onPeerLeave.bind(this));
+        this.whisper.on(EvType.Message, this.onMessage.bind(this));
+        this.whisper.on(MsgType.Typing, this.onTyping.bind(this));
+        this.whisper.on(MsgType.Ping, this.onPing.bind(this));
+        this.whisper.on(MsgType.Whisper, this.onWhisper.bind(this));
+        //
         var url = new URL(document.location.href);
         var al = url.searchParams.get("al");
         al && this.handleLogin();
     },
     computed: {
-        Client() {
-            return window.Client;
-        }
     },
     methods: {
+
         // Handle room creation.
         handleCreateRoom() {
             fetch("/api/rooms", {
@@ -172,6 +175,7 @@ var app = new Vue({
             .then(resp => resp.json())
             .then(resp => {
                 this.toggleBusy();
+                this.clearCreateRoom();
                 if (resp.error) {
                     this.notify(resp.error, notifType.error);
                 } else {
@@ -184,64 +188,165 @@ var app = new Vue({
             });
         },
 
+        clearCreateRoom() {
+          this.roomName = "";
+          this.password = "";
+        },
+
         // Login to a room.
         handleLogin() {
-            // const handle = this.handle.replace(/[^a-z0-9_\-\.@]/ig, "");
-            const bpub = this.mycrypto.publicKey();
-            var password = this.password || this.self.password || "";
-            var handle = this.self.handle || this.handle;
-            if (!handle) {
-              handle = makeid(5);
-            }
+          const bpub = this.whisper.mycrypto.publicKey();
+          var password = this.password || this.self.password || "";
+          var handle = this.self.handle || this.handle;
+          if (!handle) {
+            handle = makeid(5);
+          }
+          handle = handle.replace(/[^a-z0-9_\-\.@]/ig, "");
 
-            var url = new URL(document.location.href);
-            var al = url.searchParams.get("al");
-            var fetchURL = "/r/" + _room.id + "/login"
-            if (al) {
-              fetchURL = "/r/" + _room.id + "/login?al="+al
-            }
+          var url = new URL(document.location.href);
+          var al = url.searchParams.get("al");
+          var fetchURL = "/r/" + _room.id + "/login"
+          if (al) {
+            fetchURL = "/r/" + _room.id + "/login?al="+al
+          }
 
+          this.notify("Logging in", notifType.notice);
+          fetch(fetchURL, {
+              method: "post",
+              body: JSON.stringify({
+                publickey: bpub,
+              }),
+              headers: { "Content-Type": "application/json; charset=utf-8" }
+          })
+          .then(resp => resp.json())
+          .then(resp => {
+              if (resp.error) {
+                  this.notify(resp.error, notifType.error);
+                  if (al){ // remote the GET al argument from the window url.
+                    window.history.pushState({},document.title, "/r/" + _room.id);
+                  }
+                  return;
+              }
+              this.chatOn = true;
+              this.isRequesting = false;
+              this.clearLogin();
+              this.deNotify();
+              this.self.handle = handle;
+              this.self.since = resp.data.since;
+              this.self.secret = resp.data.secret;
+              if (al && resp.data.Handle!="") {
+                this.self.handle = resp.data.handle;
+                this.self.sealedauths = resp.data.sealedauths || {};
+              }
+              this.self.password = password;
+              this.serverpubkey = resp.data.serverpubkey;
+              this.whisper.connect (this.transport, this.serverpubkey, this.self);
+              this.transport.connect(this.transportURL());
+              setTimeout(this.onResize, 100)
+          })
+          .catch(err => {
+              this.isRequesting = false;
+              this.notify(err, notifType.error);
+          });
+        },
+
+        clearLogin() {
+          this.handle = "";
+          this.password = "";
+        },
+
+        transportURL() {
+          var url = document.location.protocol.replace(/http(s?):/, "ws$1:") + "//"+
+            document.location.host + "/r/" + _room.id + "/ws";
+          return url;
+        },
+
+        onTransportConnect() {
+          clearTimeout(this.reconnectHandle)
+        },
+
+        onTransportDisconnect() {
+          this.whisper.close()
+          this.onTransportReconnecting(4000)
+        },
+
+        onTransportReconnecting(timeout) {
+          this.notify("Disconnected. Trying to connect...", notifType.notice, timeout);
+          clearTimeout(this.reconnectHandle)
+          this.reconnectHandle = setTimeout(function () {
+            clearTimeout(this.reconnectHandle)
             this.notify("Logging in", notifType.notice);
+
+            const bpub = this.whisper.mycrypto.publicKey();
+            this.isRequesting = true;
+            this.chatOn = true;
+            var fetchURL = "/r/" + _room.id + "/login"
             fetch(fetchURL, {
-                method: "post",
-                body: JSON.stringify({
-                  publickey: bpub,
-                }),
-                headers: { "Content-Type": "application/json; charset=utf-8" }
+              method: "post",
+              body: JSON.stringify({
+                publickey: bpub,
+                secret: this.self.secret,
+              }),
+              headers: { "Content-Type": "application/json; charset=utf-8" }
             })
             .then(resp => resp.json())
             .then(resp => {
-                if (resp.error) {
-                    this.notify(resp.error, notifType.error);
-                    if (al){
-                      window.history.pushState({},document.title, "/r/" + _room.id);
-                    }
-                    return;
-                }
-                this.chatOn = true;
-                this.isRequesting = false;
-                this.clear();
-                this.deNotify();
-                this.self.avatar = this.hashColor(bpub);
-                this.self.since = resp.data.since;
-                this.self.secret = resp.data.secret;
-                this.self.handle = handle;
-                if (al && resp.data.Handle!="") {
-                  this.self.handle = resp.data.handle;
-                  this.self.autologin = true;
-                  this.self.sealedauths = resp.data.sealedauths || {};
-                }
-                this.self.password = password;
-                // Client.rmKey({publicKey:this.self.serverpubkey});
-                this.self.serverpubkey = resp.data.serverpubkey;
-                Client.init(_room.id, this.mycrypto.get());
-                Client.addKey(this.mesharedcrypto.get());
-                Client.connect();
+              if (resp.error) {
+                this.notify(resp.error, notifType.error);
+                this.reconnectHandle = setTimeout(function () {
+                  this.onTransportReconnecting(timeout)
+                }.bind(this), timeout/2);
+                return;
+              }
+              this.self.avatar = this.hashColor(bpub);
+              this.self.since = resp.data.since;
+              this.self.secret = resp.data.secret;
+              this.self.sealedauths = resp.data.sealedauths;
+              this.serverpubkey = resp.data.serverpubkey;
+
+              this.chatOn = true;
+              this.isRequesting = false;
+              this.deNotify();
+              this.whisper.connect (this.transport, this.serverpubkey, this.self);
+              this.transport.connect(this.transportURL());
             })
             .catch(err => {
-                this.isRequesting = false;
-                this.notify(err, notifType.error);
+              this.isRequesting = false;
+              this.notify(err, notifType.error);
+              this.reconnectHandle = setTimeout(function () {
+                this.onTransportReconnecting(timeout)
+              }.bind(this), timeout/2);
             });
+
+          }.bind(this), timeout);
+        },
+
+        onDisconnect(typ) {
+          // this.whisper.close()
+          // Client.clearKeys()
+          // this.connectStatus = {};
+          switch (typ) {
+              case MsgType.Disconnect:
+                  this.notify("Disconnected. Retrying ...", notifType.notice);
+                  break;
+
+              case MsgType.RateLimited:
+                  this.notify("You sent too many messages", notifType.error);
+                  this.toggleChat();
+                  break;
+
+              case MsgType.RoomFull:
+                  this.notify("Room is full", notifType.error);
+                  this.toggleChat();
+                  break;
+
+              case MsgType.RoomDispose:
+                  this.notify("Room disposed", notifType.error);
+                  this.toggleChat();
+                  this.disposed = true;
+                  break;
+          }
+          // window.location.reload();
         },
 
         // Capture keypresses to send message on Enter key and to broadcast
@@ -263,15 +368,11 @@ var app = new Vue({
                 return;
             }
 
-            const bPub = this.mycrypto.publicKey();
-            const oldest = this.validPeers().slice(0).sort(sortBySince).pop();
-            if (oldest && oldest.shared) {
-              const data = {
-                type: Client.MsgType["typing"],
-                publicKey: bPub,
-              }
-              Client.broadcast(data, oldest.shared.publicKey, oldest.shared);
+            const data = {
+              type: MsgType.Typing,
+              publicKey: this.whisper.mycrypto.publicKey(),
             }
+            this.whisper.broadcast(data)
 
             this.typingTimer = window.setTimeout(() => {
                 this.typingTimer = null;
@@ -290,25 +391,19 @@ var app = new Vue({
           var re = new RegExp("^/(\\S+)");
           var m = userMsg.match(re);
           if (!m) {
-            const bPub = this.mycrypto.publicKey();
-            const oldest = this.validPeers().slice(0).sort(sortBySince).pop();
-            if (!oldest) {
-              console.error("could not find a peer to send message")
-              return
-            }
             const data = {
-              type: Client.MsgType["message"],
+              type: MsgType.Message,
               data: userMsg,
               timestamp: new Date(),
             }
-            Client.broadcast(data, oldest.shared.publicKey, oldest.shared);
+            this.whisper.broadcast(data)
             return
           }
 
           var commandName = m[1];
           if (!(commandName in commands)) {
               this.messages.push({
-                  type: "error",
+                  type: MsgType.Error,
                   message: `command not found /${commandName}`
               });
               this.scrollToNewester();
@@ -340,7 +435,7 @@ var app = new Vue({
           console.log("self: ", this.self)
           console.log("handle: ", this.handle)
           console.log("password: ", this.password)
-          console.log("mycrypto: ", this.mycrypto.get())
+          console.log("mycrypto: ", this.whisper.mycrypto.get())
           console.log("mesharedcrypto: ", this.mesharedcrypto.get())
           console.log("peers: ", this.peers)
           console.log("connectStatus: ", this.connectStatus)
@@ -364,7 +459,7 @@ var app = new Vue({
             });
           }
           this.messages.push({
-              type: Client.MsgType["help"],
+              type: MsgType.Help,
               message: message
           });
           this.scrollToNewester();
@@ -373,63 +468,56 @@ var app = new Vue({
         handleSetHandle(userMsg, commandName, command) {
           var re = new RegExp("^(/"+commandName+")\\s+([^\\s]+)");
           var matches = userMsg.match(re);
-          this.changeHandle(matches[2])
+          this.whisper.changeHandle(matches[2])
         },
 
         handlePing(userMsg, commandName, command) {
           var re = new RegExp("^(/"+commandName+")\\s+([^\\s]+)\\s+(.*)");
           var matches = userMsg.match(re);
-          const bPub = this.mycrypto.publicKey();
-          const peer = this.validPeers().filter( (p) => {return p.handle===matches[2];}).shift()
+          const peer = this.peers.filter( this.whisper.isHandle(matches[2]) ).shift()
           if (!peer) {
             return
           }
           const data = {
-            type: Client.MsgType["ping"],
+            type: MsgType.Ping,
             data: matches[3],
           }
-          Client.send(data, peer.publicKey);
-          // const nonce = this.mycrypto.newNonce();
-          // const msg = this.mycrypto.encrypt(JSON.stringify(data), nonce, peer.publicKey);
-          // Client.sendCrypted(msg, peer.publicKey, bPub, nonce);
+          this.whisper.send(data, peer.publicKey)
         },
 
         handleWhisper(userMsg, commandName, command) {
           var re = new RegExp("^(/"+commandName+")\\s+([^\\s]+)\\s+(.*)");
           var matches = userMsg.match(re);
-          const bPub = this.mycrypto.publicKey();
-          const peer = this.validPeers().filter( (p) => {return p.handle===matches[2];}).shift()
+          const peer = this.peers.filter( this.whisper.isHandle(matches[2]) ).shift()
           if (!peer) {
             return
           }
           const data = {
-            type: Client.MsgType["whisper"],
+            type: MsgType.Whisper,
             data: matches[3],
           }
-          Client.send(data, peer.publicKey);
-          // const nonce = this.mycrypto.newNonce();
-          // const msg = this.mycrypto.encrypt(JSON.stringify(data), nonce, peer.publicKey);
-          // Client.sendCrypted(msg, peer.publicKey, bPub, nonce);
+          this.whisper.send(data, peer.publicKey)
         },
 
         handleGrowl(userMsg, commandName, command) {
           var re = new RegExp("^(/"+commandName+")\\s+([^\\s]+)\\s+(.*)");
           var matches = userMsg.match(re);
           const data = {
-            type: Client.MsgType["growl"],
+            type: MsgType.Growl,
             data: {
               to: matches[2],
               from: this.self.handle,
               msg: matches[3],
             },
           }
-          Client.send(data, this.self.serverpubkey);
+          this.whisper.send(data, this.serverpubkey)
         },
 
         handleLogout() {
             if (!confirm("Logout?")) {
                 return;
             }
+            this.whisper.close();
             fetch("/r/" + _room.id + "/login", {
                 method: "delete",
                 headers: { "Content-Type": "application/json; charset=utf-8" }
@@ -449,9 +537,9 @@ var app = new Vue({
                 return;
             }
             const data = {
-              type: Client.MsgType["room.dispose"],
+              type: MsgType.RoomDispose,
             }
-            Client.send(data, this.self.serverpubkey);
+            this.whisper.sendMessage(data, this.serverpubkey);
         },
 
         // Flash notification.
@@ -644,481 +732,97 @@ var app = new Vue({
             }.bind(this));
         },
 
-        // Clear all states.
-        clear() {
-            this.handle = "";
-            this.password = "";
-            this.message = "";
-            this.self = {};
-            this.messages = [];
-            this.peers = [];
-            //todo: more to clear.
+        onNegotiating(negotiating) {
+          this.negotiating = negotiating;
         },
 
-        // WebSocket client event handlers.
-        onConnect() {
-            // Client.getPeers();
+        onPeerRenewHandle(peer, oldHandle) {
+          var c = this.peers.filter( this.whisper.isPubKey(peer.publicKey) ).shift()
+          c.handle = peer.handle
+          this.messages.push({
+              oldHandle: oldHandle,
+              type: MsgType.PeerRenewHandle,
+              peer: JSON.parse(JSON.stringify(peer)),
+              timestamp: new Date()
+          });
+          this.scrollToNewester();
         },
 
-        onDisconnect(typ) {
-            Client.clearKeys()
-            this.connectStatus = {};
-            switch (typ) {
-                case Client.MsgType["disconnect"]:
-                    this.notify("Disconnected. Retrying ...", notifType.notice);
-                    break;
-
-                case Client.MsgType["peer.ratelimited"]:
-                    this.notify("You sent too many messages", notifType.error);
-                    this.toggleChat();
-                    break;
-
-                case Client.MsgType["room.full"]:
-                    this.notify("Room is full", notifType.error);
-                    this.toggleChat();
-                    break;
-
-                case Client.MsgType["room.dispose"]:
-                    this.notify("Room disposed", notifType.error);
-                    this.toggleChat();
-                    this.disposed = true;
-                    break;
-            }
-            // window.location.reload();
+        onRenewMyHandle(newHandle) {
+          const bPub = this.whisper.mycrypto.publicKey()
+          var peer = this.peers.filter( this.whisper.isPubKey(bPub) ).shift()
+          var oldHandle = peer.handle;
+          peer.handle = newHandle
+          this.messages.push({
+              oldHandle: oldHandle,
+              type: MsgType.PeerRenewHandle,
+              peer: JSON.parse(JSON.stringify(peer)),
+              timestamp: new Date()
+          });
+          this.scrollToNewester();
         },
 
-        onReconnecting(timeout) {
-          this.notify("Disconnected. Trying to connect...", notifType.notice, timeout);
-          var reconnect_timer = setTimeout(function () {
-            reconnect_timer = null;
-            this.notify("Logging in", notifType.notice);
-
-            const bpub = this.mycrypto.publicKey();
-            this.isRequesting = true;
-            var fetchURL = "/r/" + _room.id + "/login"
-            fetch(fetchURL, {
-              method: "post",
-              body: JSON.stringify({
-                publickey: bpub,
-                secret: this.self.secret,
-              }),
-              headers: { "Content-Type": "application/json; charset=utf-8" }
-            })
-            .then(resp => resp.json())
-            .then(resp => {
-              if (resp.error) {
-                this.notify(resp.error, notifType.error);
-                setTimeout(function () {
-                  this.onReconnecting(timeout)
-                }.bind(this), timeout/2);
-                return;
-              }
-              this.self.avatar = this.hashColor(bpub);
-              this.self.since = resp.data.since;
-              this.self.serverpubkey = resp.data.serverpubkey;
-              Client.init(_room.id, this.mycrypto.get());
-              Client.addKey(this.mesharedcrypto.get());
-              Client.connect();
-              this.chatOn = true;
-              this.isRequesting = false;
-              this.deNotify();
-            })
-            .catch(err => {
-              this.isRequesting = false;
-              this.notify(err, notifType.error);
-              setTimeout(function () {
-                this.onReconnecting(timeout)
-              }.bind(this), timeout/2);
-            });
-
-          }.bind(this), timeout);
-        },
-
-        // onPeerSelf(data) {
-        //     this.self = {
-        //         ...data.data,
-        //         avatar: this.hashColor(data.data.id)
-        //     };
-        // },
-
-        validPeers() {
-          const bPub = this.mycrypto.publicKey();
-          return this.peers.filter( (p) => {
-            return p.publicKey===bPub || (p.wasChallenged && p.passChallenge && p.validHandle);
-          })
-        },
-
-        onPeerJoinLeave(cleardata, data) {
-            if (data.from!==this.self.serverpubkey){
-              console.error("must be issued by the server", data, cleardata)
-              return
-            }
-            const bPub = this.mycrypto.publicKey();
-            const peer = cleardata;
+        onPeerAccept(peer) {
+          peer = JSON.parse(JSON.stringify(peer));
+          const c = this.peers.filter( this.whisper.isPubKey(peer.publicKey) ).shift()
+          if (!c) {
             peer.avatar = this.hashColor(peer.publicKey);
-            if (peer.publicKey===bPub){
-              return
-            }
-
-            // Add / remove the peer from the existing list.
-            if (cleardata.type === Client.MsgType["peer.join"]) {
-                delete(peer.type)
-                peer.passChallenge = false;
-                peer.wasChallenged = true;
-                this.issueChallenge(peer);
-                this.peers.push(peer);
-                this.peers.sort(sortByHandle)
-                return
-            }
-            this.peers = this.peers.filter( notPubKey(cleardata.publicKey) );
-            delete this.connectStatus[cleardata.publicKey];
-            var thispeer = this.peers.filter( isPubKey(cleardata.publicKey) ).shift();
-            if (thispeer){
-              if (thispeer.shared){
-                Client.rmKey(thispeer.shared.publicKey);
-              }
-              this.messages.push({
-                  type: Client.MsgType["peer.leave"],
-                  peer: JSON.parse(JSON.stringify(thispeer)),
-                  timestamp: new Date()
-              });
-            }
+            this.peers.push(peer)
+            this.peers.sort(sortByHandle)
+            this.messages.push({
+                type: MsgType.PeerJoin,
+                peer: JSON.parse(JSON.stringify(peer)),
+                timestamp: new Date()
+            });
             this.scrollToNewester();
+          }
+        },
+
+        onPeerLeave(cleardata, data) {
+          // const bPub = this.whisper.mycrypto.publicKey();
+          // const peer = cleardata;
+          // if (peer.publicKey===bPub){
+          //   return
+          // }
+          const c = this.peers.filter( this.whisper.isPubKey(cleardata.publicKey) ).shift();
+          if (c) {
+            this.messages.push({
+                type: MsgType.PeerLeave,
+                peer: JSON.parse(JSON.stringify(c)),
+                timestamp: new Date()
+            });
+            this.scrollToNewester();
+            this.peers = this.peers.filter( this.whisper.notPubKey(cleardata.publicKey) )
+            this.peers.sort(sortByHandle)
+          }
         },
 
         onPeers(cleardata, data) {
-            if (data.from!==this.self.serverpubkey){
-              console.error("must be issued by the server", data, cleardata)
-              return
-            }
+          if (data.from!==this.serverpubkey){
+            console.error("must be issued by the server", data, cleardata)
+            return
+          }
 
-            this.peers = cleardata.peers;
+          this.peers = cleardata.peers;
 
-            const bPub = this.mycrypto.publicKey();
-            this.peers.forEach((p, i) => {
-              p.avatar = this.hashColor(p.publicKey);
-              if(p.publicKey!==bPub && (!!p.publicKey) && !p.wasChallenged && !p.passChallenge) {
-                p.passChallenge = false;
-                p.wasChallenged = true;
-                this.issueChallenge(p);
-              }else if (p.publicKey===bPub){
-                p.handle = this.self.handle;
-                p.shared = this.mesharedcrypto.get();
-              }
-            });
-
-            this.peers.sort(sortByHandle)
-        },
-
-        // issueChallenge sends a challenge to the remote to accept us.
-        // The challenge is a hash of the room password, the since server time value,
-        // a nonce, and the peer public key.
-        issueChallenge(peer) {
-          this.updateConnectionStatus(peer.publicKey, "remote", "negotiating")
           const bPub = this.mycrypto.publicKey();
-          const hnonce = this.mycrypto.newNonce();
-          const hash = this.mycrypto.hashRoomPwd(this.self.password, peer.since, hnonce, bPub, peer.publicKey);
-          var sealedauth = "";
-          if (this.self.autologin && this.self.sealedauths[peer.publicKey]) {
-            sealedauth = this.self.sealedauths[peer.publicKey];
-            delete(this.self.sealedauths[peer.publicKey])
-          }
-          const data = {
-            type: Client.MsgType["challenge.query"],
-            data: hash,
-            nonce: hnonce,
-            handle: this.self.handle,
-            sealedauth: sealedauth,
-          }
-          Client.send(data, peer.publicKey);
-        },
-
-        // onChallengeQuery handles challenge sent by other peers,
-        // it issue an accept message on success,
-        // a duplicate handle message if the handles is busy.
-        // The challenge consist of recrate the hash with our data,
-        // and compare it to the received challenge hash.
-        // If the challenge is completed, peer.passChallenge=true,
-        // then the peer handle is checked for duplication.
-        // If it is uniq, peer.validHandle=true an accept message is issued.
-        // Otherwise a duplicate handle message is issued.
-        // It saves the peer handle to the peer list.
-        onChallengeQuery(cleardata, data) {
-          var peer = this.peers.filter( isPubKey(data.from) ).shift();
-          if (!peer) {
-            console.error("invalid challenge: peer not found");
-            this.issueChallengeFailed({publicKey:data.from});
-            return
-          }
-          const bpub = this.mycrypto.publicKey()
-          const hash = this.mycrypto.hashRoomPwd(this.self.password, this.self.since, cleardata.nonce, data.from, bpub);
-          if(hash!==cleardata.data) {
-            console.error("invalid challenge: hash mismatch");
-            this.issueChallengeFailed(peer);
-            return
-          }
-          const isRenewHandle = (peer.passChallenge && peer.validHandle);
-          peer.passChallenge = true;
-          peer.passSealedAuth = false;
-          if (cleardata.sealedauth) {
-            var nonce = cleardata.sealedauth.nonce;
-            var data = cleardata.sealedauth.data;
-            var sealedAuth = this.mycrypto.decrypt(data, nonce, this.self.serverpubkey)
-            if (!sealedAuth) {
-              console.error("invalid challenge: sealed auth can not be decrypted");
-              this.issueInvalidSealedAuth(peer, cleardata.handle);
-              return
-            }
-            if(sealedAuth.secret!==this.self.secret){
-              console.error("invalid challenge: invalid secret"); // this is probably very bad.
-              this.issueInvalidSealedAuth(peer, cleardata.handle);
-              return
-            }
-            var elapsed = Date.UTC() - Date.parse(sealedAuth.date);
-            var elapsedSec = Math.round(elapsed/1000);
-            var maxElapsed = 60 * 5; //5 minutes
-            if (elapsedSec > maxElapsed) {
-              console.error("invalid challenge: token lifetime exceeded");
-              this.issueInvalidSealedAuth(peer, cleardata.handle);
-              return
-            }
-            passSealedAuth = true;
-            peer.passSealedAuth = true;
-          }
-          peer.validHandle = true;
-          this.peers.filter( notPubKey(peer.publicKey) ).map( (p) => {
-            if (p.passSealedAuth) {
-              return
-            }
-            if (p.handle===cleardata.handle) {
-              if (peer.passSealedAuth) {
-                p.validHandle = false;
-                if (p.publicKey===bpub){
-                  this.renewHandle();
-                  return
-                }
-                this.issueDuplicateHandle(p, p.handle);
-                return
-              }
-              const peerSince = Date.parse(peer.since);
-              const pSince = Date.parse(p.since);
-              peer.validHandle = pSince>peerSince;
+          this.peers.forEach((p, i) => {
+            p.avatar = this.hashColor(p.publicKey);
+            if(p.publicKey!==bPub && (!!p.publicKey) && !p.wasChallenged && !p.passChallenge) {
+              p.passChallenge = false;
+              p.wasChallenged = true;
+              this.issueChallenge(p);
+            }else if (p.publicKey===bPub){
+              p.handle = this.self.handle;
+              p.shared = this.mesharedcrypto.get();
             }
           });
-          if(!peer.validHandle) {
-            this.issueDuplicateHandle(peer, cleardata.handle)
-            return
-          }
-          const oldHandle = peer.handle;
-          peer.handle = cleardata.handle;
+
           this.peers.sort(sortByHandle)
-          this.issueAccept(peer);
-          if (isRenewHandle) {
-            this.messages.push({
-                type: Client.MsgType["peer.renewhandle"],
-                oldHandle:oldHandle,
-                peer: JSON.parse(JSON.stringify(peer)),
-                timestamp: new Date(),
-            });
-          }else {
-            this.messages.push({
-                type: Client.MsgType["peer.join"],
-                peer: JSON.parse(JSON.stringify(peer)),
-                timestamp: new Date(),
-            });
-          }
-        },
-
-        // issueAccept notifies remote peer that it passes the callenge and
-        // was accepted into out valid peer list.
-        // The issue accept message contain the shared set of private/public key
-        // to send chat messages.
-        issueAccept(peer) {
-          this.updateConnectionStatus(peer.publicKey, "me", "room.accept")
-          const bPub = this.mycrypto.publicKey();
-          const data = {
-            type: Client.MsgType["room.accept"],
-            shared: this.mesharedcrypto.get(),
-            // myleader: this.myleader,
-          }
-          Client.send(data, peer.publicKey);
-        },
-
-        // issueChallengeFailed sends a chalenge failure message.
-        issueChallengeFailed(peer) {
-          this.updateConnectionStatus(peer.publicKey, "me", "challenge.failed")
-          const bPub = this.mycrypto.publicKey();
-          const data = {
-            type: Client.MsgType["challenge.failed"],
-          }
-          Client.send(data, peer.publicKey);
-        },
-
-        // issueDuplicateHandle sends a duplicate handle message.
-        // Is duplicated an handle that matches an existing handle.
-        issueDuplicateHandle(peer, handle) {
-          this.updateConnectionStatus(peer.publicKey, "me", "duplicate.handle")
-          const bPub = this.mycrypto.publicKey();
-          const data = {
-            type: Client.MsgType["duplicate.handle"],
-            handle: handle,
-          }
-          Client.send(data, peer.publicKey);
-        },
-
-        // issueInvalidSealedAuth sends an invalid sealed auth message.
-        // Is invalid a sealed auth that can not be decrypted,
-        // did not present the correct secret or its token lifetime exceeded.
-        issueInvalidSealedAuth(peer, handle) {
-          this.updateConnectionStatus(peer.publicKey, "me", "sealedauth.invalid")
-          const bPub = this.mycrypto.publicKey();
-          const data = {
-            type: Client.MsgType["invalid.sealedauth"],
-            handle: handle,
-          }
-          Client.send(data, peer.publicKey);
-        },
-
-        // onChallengeFailed handles challenge failed message.
-        onChallengeFailed(cleardata, data) {
-          const from = data.from;
-          this.updateConnectionStatus(from, "remote", "challenge.failed")
-        },
-
-        // onDuplicateHandle handles duplicate message.
-        // It marks the peer remote view to "duplicate.handle".
-        onDuplicateHandle(cleardata, data) {
-          const meHandle = this.self.handle;
-          if (cleardata.handle!==meHandle) {
-            return
-          }
-          const from = data.from;
-          this.updateConnectionStatus(from, "remote", "duplicate.handle")
-        },
-
-        // onInvalidSealedAuth handles invalid sealed auth message.
-        // It marks the peer remote view to "invalid.sealedauth".
-        onInvalidSealedAuth(cleardata, data) {
-          const meHandle = this.self.handle;
-          if (cleardata.handle!==meHandle) {
-            return
-          }
-          const from = data.from;
-          this.updateConnectionStatus(from, "remote", "invalid.sealedauth")
-        },
-
-        // onAccepted handles accept message.
-        // It marks the peer remote view to "room.accept".
-        // It saves the peer shared keys to the peer list.
-        onAccepted(cleardata, data) {
-          const from = data.from;
-          this.updateConnectionStatus(from, "remote", "room.accept")
-          const remote = this.peers.filter( isPubKey(from) ).shift();
-          if (remote){
-            remote.shared = cleardata.shared;
-            Client.addKey(cleardata.shared);
-          }
-        },
-
-        // updateConnectionStatus
-        updateConnectionStatus(pk, v, s) {
-          if (!this.connectStatus[pk]) {
-            this.connectStatus[pk] = {}
-          }
-          this.connectStatus[pk][v] = s
-          this.computeConnectionStatus();
-        },
-
-        // computeConnectionStatus checks for each connection status
-        // with current peer list we know of.
-        // It finds the majority of responses, if it is a "dulicate.handle"
-        // message, it automatically generate a new handle and triggers a "renew.handle"
-        // sequence.
-        // Otherwise, the connection with other peers is OK/in progress.
-        computeConnectionStatus() {
-          this.negotiating = Object.keys(this.connectStatus).filter((k)=>{
-            return this.connectStatus[k]["remote"]==="negotiating";
-          }).length;
-
-          const acceptedPeers = this.peers.filter( (p) => {
-            return p.passChallenge;
-          });
-          const majority = acceptedPeers.length/2;
-          if (majority<1) {
-            return
-          }
-          var totalOk = 0;
-          var handleKo = 0;
-          var invalidSealedAuth = 0;
-          Object.keys(this.connectStatus).map( (k) => {
-            if (this.connectStatus[k]["remote"]===Client.MsgType["duplicate.handle"]) {
-              handleKo++;
-            }else if (this.connectStatus[k]["remote"]===Client.MsgType["room.accept"]) {
-              totalOk++;
-            }else if (this.connectStatus[k]["remote"]===Client.MsgType["invalid.sealedauth"]) {
-              invalidSealedAuth++;
-            }
-          })
-          const totalKo = handleKo+invalidSealedAuth;
-          if (handleKo>=majority) {
-            this.notify("Your handle is already taken by another peer, change your nickname", notifType.error);
-            this.renewHandle()
-            return
-          }else if (invalidSealedAuth>=majority) {
-            this.notify("Your could not terminate the login sequence, your sealed authentifications are incorrect", notifType.error);
-            this.renewHandle()
-            return
-          }else if (totalKo>=majority) {
-            this.notify("You were not accepted to the room", notifType.error);
-            return
-          }
-        },
-
-        //renewHandle renews and handle whecking its uniquness
-        // according to our current peer list.
-        // It then triggers a challenge sequence to become accepted.
-        renewHandle() {
-          var newHandle = "";
-          var uniq = false;
-          const validPeers = this.validPeers();
-          if (validPeers.length>0){
-            while(!uniq) {
-              newHandle = makeid(5);
-              var k = validPeers.filter((p)=>{return p.handle===newHandle})
-              uniq = k.length===0;
-            }
-          }
-          this.changeHandle(newHandle)
-        },
-
-        // changeHandle handles the handle renewing,
-        // it verifies that the new handle is uniq, or
-        // shows a notficiation error.
-        // It then re challenge each peer with the new handle.
-        changeHandle(newHandle) {
-          if (newHandle===this.self.handle) {
-            return
-          }
-          var uniq = false;
-          const validPeers = this.validPeers();
-          if (validPeers.length>0){
-            var k = validPeers.filter((p)=>{return p.handle===newHandle})
-            uniq = k.length===0;
-          }
-          if(!uniq){
-            this.notify("Your handle is already taken by another peer, change your nickname", notifType.error);
-            return
-          }
-          const bPub = this.mycrypto.publicKey();
-          this.self.handle = newHandle;
-          this.peers.filter( notPubKey(bPub) ).map( this.issueChallenge )
-          this.peers.filter( isPubKey(bPub) ).map( (p) => {
-            p.handle = newHandle;
-          })
         },
 
         onTyping(cleardata, data) {
-            const peer = this.validPeers().filter( isPubKey(cleardata.publicKey) ).pop();
+            const peer = this.peers.filter( this.whisper.isPubKey(cleardata.publicKey) ).pop();
             if (!peer) {
               console.error("onTyping: peer not found, cleardata=", cleardata)
               return
@@ -1147,105 +851,105 @@ var app = new Vue({
         },
 
         onMessage(cleardata, data) {
-            const from = data.from;
-            const peer = this.validPeers().filter( (p) => { return p.publicKey===from; }).pop();
-            if (!peer) {
-              console.error("onMessage: peer not found, msg=", data)
-              return
-            }
-            this.typingPeers.delete(from);
-            this.messages.push({
-                type: cleardata.type,
-                timestamp: new Date(),
-                message: cleardata.data,
-                peer: {
-                    handle: peer.handle,
-                    avatar: this.hashColor(from)
-                }
-            });
-            this.scrollToNewester();
-            // If the window isn't in focus, start the "new activity" animation
-            // in the title bar.
-            if (!document.hasFocus()) {
-                this.newActivity = true;
-                this.beep();
-            }
+          const from = data.from;
+          const peer = this.peers.filter( this.whisper.isPubKey(from) ).pop();
+          if (!peer) {
+            console.error("onMessage: peer not found, msg=", data)
+            return
+          }
+          this.typingPeers.delete(from);
+          this.messages.push({
+              type: cleardata.type,
+              timestamp: new Date(),
+              message: cleardata.data,
+              peer: {
+                  handle: peer.handle,
+                  avatar: this.hashColor(from)
+              }
+          });
+          this.scrollToNewester();
+          // If the window isn't in focus, start the "new activity" animation
+          // in the title bar.
+          if (!document.hasFocus()) {
+              this.newActivity = true;
+              this.beep();
+          }
         },
 
         onUpload(cleardata, data) {
-          var d = data.data.data;
-          if (data.type==Client.MsgType["uploading"]) {
-            var found = false;
-            this.messages.map((m) => {
-              if (m.uid===d.uid){
-                m.files=d.files;
-                m.percent=d.percent;
-                m.type=data.type;
-                found=true;
-              }
-            });
-            if(!found) {
-              this.messages.push({
-                type: data.type,
-                timestamp: new Date(),
-                uid: d.uid,
-                files: d.files,
-                percent: d.percent,
-                peer: {
-                  id: data.data.peer_id,
-                  handle: data.data.peer_handle,
-                  avatar: this.hashColor(data.data.peer_id)
-                }
-              });
-            }
-          }else {
-            var found = false;
-            this.messages.map((m) => {
-              if (m.uid===d.uid){
-                if(d.res) {
-                  m.res=d.res.data;
-                }
-                m.files = m.files || [];
-                m.err=d.err;
-                m.type=data.type;
-                found=true;
-              }
-            });
-            if(!found) {
-              var res = {};
-              if (d.res) {
-                res = d.res.data;
-              }
-              this.messages.push({
-                type: data.type,
-                timestamp: new Date(),
-                uid: d.uid,
-                res: res,
-                files: [],
-                err: d.err,
-                peer: {
-                  id: data.data.peer_id,
-                  handle: data.data.peer_handle,
-                  avatar: this.hashColor(data.data.peer_id)
-                }
-              });
-            }
-          }
-          this.scrollToNewester();
+        //   var d = data.data.data;
+        //   if (data.type==MsgType.Uploading) {
+        //     var found = false;
+        //     this.messages.map((m) => {
+        //       if (m.uid===d.uid){
+        //         m.files=d.files;
+        //         m.percent=d.percent;
+        //         m.type=data.type;
+        //         found=true;
+        //       }
+        //     });
+        //     if(!found) {
+        //       this.messages.push({
+        //         type: data.type,
+        //         timestamp: new Date(),
+        //         uid: d.uid,
+        //         files: d.files,
+        //         percent: d.percent,
+        //         peer: {
+        //           id: data.data.peer_id,
+        //           handle: data.data.peer_handle,
+        //           avatar: this.hashColor(data.data.peer_id)
+        //         }
+        //       });
+        //     }
+        //   }else {
+        //     var found = false;
+        //     this.messages.map((m) => {
+        //       if (m.uid===d.uid){
+        //         if(d.res) {
+        //           m.res=d.res.data;
+        //         }
+        //         m.files = m.files || [];
+        //         m.err=d.err;
+        //         m.type=data.type;
+        //         found=true;
+        //       }
+        //     });
+        //     if(!found) {
+        //       var res = {};
+        //       if (d.res) {
+        //         res = d.res.data;
+        //       }
+        //       this.messages.push({
+        //         type: data.type,
+        //         timestamp: new Date(),
+        //         uid: d.uid,
+        //         res: res,
+        //         files: [],
+        //         err: d.err,
+        //         peer: {
+        //           id: data.data.peer_id,
+        //           handle: data.data.peer_handle,
+        //           avatar: this.hashColor(data.data.peer_id)
+        //         }
+        //       });
+        //     }
+        //   }
+        //   this.scrollToNewester();
         },
 
         onPing(cleardata, data) {
           if (document.hasFocus()) {
             return
           }
-          const peer = this.validPeers().filter( (p) => { return p.publicKey===data.from;}).pop();
+          const peer = this.peers.filter( this.whisper.isPubKey(data.from) ).pop();
           if (!peer) {
             console.error("peer not found", data.from)
             return
           }
           if (Notify.needsPermission) {
             this.messages.push({
-              type: Client.MsgType["ping"],
+              type: MsgType.Ping,
               message: cleardata.data,
               timestamp: new Date(),
               peer: {
@@ -1267,13 +971,13 @@ var app = new Vue({
         },
 
         onWhisper(cleardata, data) {
-          const peer = this.validPeers().filter( isPubKey(data.from) ).pop();
+          const peer = this.peers.filter( this.whisper.isPubKey(data.from) ).pop();
           if (!peer) {
             console.error("peer not found", data.from)
             return
           }
           this.messages.push({
-            type: Client.MsgType["whisper"],
+            type: MsgType.Whisper,
             message: cleardata.data,
             timestamp: new Date(),
             peer: {
@@ -1286,31 +990,6 @@ var app = new Vue({
             this.newActivity = true;
             this.beep();
           }
-        },
-
-        // Register chat client events.
-        initClient() {
-            Client.on(Client.MsgType["connect"], this.onConnect);
-            Client.on(Client.MsgType["disconnect"], (data) => { this.onDisconnect(Client.MsgType["disconnect"]); });
-            Client.on(Client.MsgType["peer.ratelimited"], (data) => { this.onDisconnect(Client.MsgType["peer.ratelimited"]); });
-            Client.on(Client.MsgType["room.dispose"], (data) => { this.onDisconnect(Client.MsgType["room.dispose"]); });
-            Client.on(Client.MsgType["room.full"], (data) => { this.onDisconnect(Client.MsgType["room.full"]); });
-            Client.on(Client.MsgType["reconnecting"], this.onReconnecting);
-
-            Client.on(Client.MsgType["peer.list"], this.onPeers);
-            Client.on(Client.MsgType["peer.join"], this.onPeerJoinLeave);
-            Client.on(Client.MsgType["peer.leave"], this.onPeerJoinLeave);
-            Client.on(Client.MsgType["message"], this.onMessage);
-            Client.on(Client.MsgType["motd"], this.onMotd);
-            Client.on(Client.MsgType["typing"], this.onTyping);
-            Client.on(Client.MsgType["ping"], this.onPing);
-            Client.on(Client.MsgType["whisper"], this.onWhisper);
-            Client.on(Client.MsgType["challenge.query"], this.onChallengeQuery);
-            Client.on(Client.MsgType["challenge.failed"], this.onChallengeFailed);
-            Client.on(Client.MsgType["duplicate.handle"], this.onDuplicateHandle);
-            Client.on(Client.MsgType["room.accept"], this.onAccepted);
-            // Client.on(Client.MsgType["uploading"], this.onUpload);
-            // Client.on(Client.MsgType["upload"], this.onUpload);
         },
 
         initTimers() {
@@ -1356,51 +1035,51 @@ var app = new Vue({
 
         // image upload
         addFile(e) {
-          this.isDraggingOver=false
-          // based on https://www.raymondcamden.com/2019/08/08/drag-and-drop-file-upload-in-vuejs
-          let droppedFiles = e.dataTransfer.files;
-          if(!droppedFiles) return;
-          var uid = Math.round(new Date().getTime() + (Math.random() * 100));
-          // this tip, convert FileList to array, credit: https://www.smashingmagazine.com/2018/01/drag-drop-file-uploader-vanilla-js/
-          var ok = true;
-          let formData = new FormData();
-          var files = [];
-          ([...droppedFiles]).forEach((f,x) => {
-            if (x>=20) {
-              this.notify("Too much files to upload", notifType.error);
-              ok = false;
-              return
-            }
-            formData.append('file'+(x), f);
-            files.push(f.name)
-          })
-          if (!ok) {
-            return
-          }
-          Client.sendMessage(Client.MsgType["uploading"], {uid:uid,files:files,percent:0});
-
-          axios.post("/r/" + _room.id + "/upload", formData,
-            {
-              headers: {
-                  'Content-Type': 'multipart/form-data'
-              },
-              onUploadProgress: function( progressEvent ) {
-                var p = parseInt( Math.round( ( progressEvent.loaded / progressEvent.total ) * 100 ) );
-                Client.sendMessage(Client.MsgType["uploading"], {uid:uid,files:files,percent:p});
-              }
-            }
-          ).then(res => {
-            if (res.error){
-              this.notify(res.error, notifType.error);
-              Client.sendMessage(Client.MsgType["upload"], {uid:uid,err:res.error});
-            }else{
-              Client.sendMessage(Client.MsgType["upload"], {uid:uid,res:res.data});
-            }
-          })
-          .catch(err => {
-            Client.sendMessage(Client.MsgType["upload"], {uid:uid,err:err.message});
-            this.notify(err, notifType.error);
-          });
+          // this.isDraggingOver=false
+          // // based on https://www.raymondcamden.com/2019/08/08/drag-and-drop-file-upload-in-vuejs
+          // let droppedFiles = e.dataTransfer.files;
+          // if(!droppedFiles) return;
+          // var uid = Math.round(new Date().getTime() + (Math.random() * 100));
+          // // this tip, convert FileList to array, credit: https://www.smashingmagazine.com/2018/01/drag-drop-file-uploader-vanilla-js/
+          // var ok = true;
+          // let formData = new FormData();
+          // var files = [];
+          // ([...droppedFiles]).forEach((f,x) => {
+          //   if (x>=20) {
+          //     this.notify("Too much files to upload", notifType.error);
+          //     ok = false;
+          //     return
+          //   }
+          //   formData.append('file'+(x), f);
+          //   files.push(f.name)
+          // })
+          // if (!ok) {
+          //   return
+          // }
+          // Client.sendMessage(Client.MsgType["uploading"], {uid:uid,files:files,percent:0});
+          //
+          // axios.post("/r/" + _room.id + "/upload", formData,
+          //   {
+          //     headers: {
+          //         'Content-Type': 'multipart/form-data'
+          //     },
+          //     onUploadProgress: function( progressEvent ) {
+          //       var p = parseInt( Math.round( ( progressEvent.loaded / progressEvent.total ) * 100 ) );
+          //       Client.sendMessage(Client.MsgType["uploading"], {uid:uid,files:files,percent:p});
+          //     }
+          //   }
+          // ).then(res => {
+          //   if (res.error){
+          //     this.notify(res.error, notifType.error);
+          //     Client.sendMessage(Client.MsgType["upload"], {uid:uid,err:res.error});
+          //   }else{
+          //     Client.sendMessage(Client.MsgType["upload"], {uid:uid,res:res.data});
+          //   }
+          // })
+          // .catch(err => {
+          //   Client.sendMessage(Client.MsgType["upload"], {uid:uid,err:err.message});
+          //   this.notify(err, notifType.error);
+          // });
         },
 
         onResize(event) {

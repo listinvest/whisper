@@ -24,13 +24,6 @@
 				maxlength="30" autocomplete="off" />
 			<span class="help">3 to 30 characters</span>
 		</p>
-		{{ if .Data.Room.Predefined }}
-		<p>
-			<input v-model="userpwd" type="password" name="userpwd"
-				placeholder="Nick name password"
-				maxlength="100" autocomplete="off" />
-		</p>
-		{{ end }}
 		<p>
 			<input type="submit" class="button" value="Login" />
 		</p>
@@ -43,7 +36,7 @@
 	<section class="chat">
 		<span class="sidebar-handle" v-on:click.prevent="toggleSidebar">
 			{( sidebarOn ? "&rarr;" : "&larr;" )}
-			<span class="icon">👥<sup>{( validPeers().length )}</sup></span>
+			<span class="icon">👥<sup>{( peers.length )}</sup></span>
 		</span>
 		<div class="messages" ref="messages"
 				@drop.prevent="addFile" @dragover.prevent
@@ -52,7 +45,7 @@
 				v-bind:class="{ dragover: isDraggingOver }">
 			<ul class="no">
 				<li v-for="m in messages" class="message">
-					<div class="wrap" v-if="m.type === Client.MsgType['message']">
+					<div class="wrap" v-if="m.type === MsgType.Message">
 						<div class="meta">
 							<span class="peer">
 								<span class="avatar" :style="{'background-color': m.peer.avatar}"></span>
@@ -62,13 +55,13 @@
 						</div>
 						<div class="content" v-html="formatMessage(m.message)"></div>
 					</div>
-					<div class="wrap error" v-else-if="m.type === 'error'">
+					<div class="wrap error" v-else-if="m.type === MsgType.Error">
 						<p v-html="m.message"></p>
 					</div>
-					<div class="wrap help" v-else-if="m.type === Client.MsgType['help']">
+					<div class="wrap help" v-else-if="m.type === MsgType.Help">
 						<p v-html="m.message"></p>
 					</div>
-					<div class="wrap ping" v-else-if="m.type === Client.MsgType['ping']">
+					<div class="wrap ping" v-else-if="m.type === MsgType.Ping">
 						<div class="meta">
 							<span class="peer">
 								<span class="avatar" :style="{'background-color': m.peer.avatar}"></span>
@@ -78,7 +71,7 @@
 						</div>
 						<div class="content" v-html="formatMessage(m.message)"></div>
 					</div>
-					<div class="wrap whisper" v-else-if="m.type === Client.MsgType['whisper']">
+					<div class="wrap whisper" v-else-if="m.type === MsgType.Whisper">
 						<div class="meta">
 							<span class="peer">
 								<span class="avatar" :style="{'background-color': m.peer.avatar}"></span>
@@ -88,10 +81,10 @@
 						</div>
 						<div class="content" v-html="formatMessage(m.message)"></div>
 					</div>
-					<div class="wrap motd" v-else-if="m.type === Client.MsgType['motd']">
+					<div class="wrap motd" v-else-if="m.type === MsgType.Motd">
 						{( m.message )}
 					</div>
-					<div class="wrap uploading" v-else-if="m.type === Client.MsgType['uploading']">
+					<div class="wrap uploading" v-else-if="m.type === MsgType.Uploading">
 						<div class="meta">
 							<span class="peer">
 								<span class="avatar" :style="{'background-color': m.peer.avatar}"></span>
@@ -106,7 +99,7 @@
 							- <b>{(m.percent)} %</b>
 						</div>
 					</div>
-					<div class="wrap upload" v-else-if="m.type === Client.MsgType['upload']">
+					<div class="wrap upload" v-else-if="m.type === MsgType.Upload">
 						<div class="meta">
 							<span class="peer">
 								<span class="avatar" :style="{'background-color': m.peer.avatar}"></span>
@@ -153,7 +146,7 @@
 							</div>
 						</div>
 					</div>
-					<div class="wrap notice" v-else-if="m.type === Client.MsgType['peer.renewhandle']">
+					<div class="wrap notice" v-else-if="m.type === MsgType.PeerRenewHandle">
 						<span class="timestamp" :title="m.timestamp">{( formatDate(m.timestamp) )}</span>
 						&mdash;
 						<span class="peer">
@@ -169,7 +162,7 @@
 						<span class="peer">
 							<span class="avatar" :style="{'background-color': m.peer.avatar}"></span>
 							<span class="handle">{( m.peer.handle )}</span>
-								{(m.type === Client.MsgType['peer.join'] ? "joined" : "left")}
+								{(m.type === MsgType.PeerJoin ? "joined" : "left")}
 						</span>
 					</div>
 				</li>
@@ -177,15 +170,15 @@
 		</div>
 		<div v-if="sidebarOn" class="sidebar">
 			<h2 class="title">
-				<span v-if="validPeers().length > 1">{( validPeers().length )} peers</span>
+				<span v-if="peers.length > 1">{( peers.length )} peers</span>
 				<span v-else>Just you</span>
 			</h2>
 			<ul class="no peers">
-				<li v-for="p in validPeers()">
+				<li v-for="p in peers">
 					<span class="peer">
 						<span class="avatar" :style="{'background-color': p.avatar}"></span>
 						<span class="handle">{( p.handle )}
-							{( p.publicKey === mycrypto.publicKey() ? "*" : "" )}</span>
+							{( p.publicKey === whisper.mycrypto.publicKey() ? "*" : "" )}</span>
 					</span>
 				</li>
 			</ul>

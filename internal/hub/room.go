@@ -368,11 +368,11 @@ loop:
 				r.hub.log.Printf("peer %q did not login", info.publicKey)
 				continue
 			}
-			peer.Connect(info.ws)
 
-			r.peers[peer] = true
+			peer.Connect(info.ws)
 			go peer.RunListener()
 			go peer.RunWriter()
+			r.peers[peer] = true
 
 			// Send the peer its info.
 			data := peerListMsg{Type: TypePeerList, Peers: r.peers.peerMsgList(true)}
@@ -392,7 +392,7 @@ loop:
 				PublicKey: peer.PublicKey,
 				Since:     peer.Since.Format(JSDateFormat),
 			}
-			r.BroadcastUnsealed(peerJoin)
+			go r.BroadcastUnsealed(peerJoin)
 			r.hub.log.Printf("%s joined %s", peer.PublicKey, r.ID)
 
 		// Incoming peer request.
@@ -410,7 +410,7 @@ loop:
 					PublicKey: req.peer.PublicKey,
 					Since:     req.peer.Since.Format(JSDateFormat),
 				}
-				r.BroadcastUnsealed(peerLeave)
+				go r.BroadcastUnsealed(peerLeave)
 				r.hub.log.Printf("%s left %s", req.peer.PublicKey, r.ID)
 
 			// A peer has requested the room's peer list.
